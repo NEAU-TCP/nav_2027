@@ -1,0 +1,5 @@
+<library path="rog_map_costmap_layer">
+  <class type="rog_map_costmap_layer::RogMapLayer" base_class_type="nav2_costmap_2d::Layer">
+    <description>Marks occupied cells from the ROG-Map projection.</description>
+  </class>
+</library>
