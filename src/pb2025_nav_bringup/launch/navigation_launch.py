@@ -30,6 +30,7 @@ def generate_launch_description():
     bringup_dir = get_package_share_directory("pb2025_nav_bringup")
 
     namespace = LaunchConfiguration("namespace")
+    map_yaml_file = LaunchConfiguration("map")
     use_sim_time = LaunchConfiguration("use_sim_time")
     autostart = LaunchConfiguration("autostart")
     params_file = LaunchConfiguration("params_file")
@@ -50,7 +51,11 @@ def generate_launch_description():
     ]
 
     # Create our own temporary YAML files that include substitutions
-    param_substitutions = {"use_sim_time": use_sim_time, "autostart": autostart}
+    param_substitutions = {
+        "use_sim_time": use_sim_time,
+        "autostart": autostart,
+        "planner_server.ros__parameters.MincoPlanner.rog_map.fixed_boundary.map_yaml": map_yaml_file,
+    }
 
     configured_params = ParameterFile(
         RewrittenYaml(
@@ -76,6 +81,10 @@ def generate_launch_description():
         "use_sim_time",
         default_value="false",
         description="Use simulation (Gazebo) clock if true",
+    )
+
+    declare_map_yaml_cmd = DeclareLaunchArgument(
+        "map", default_value="", description="Map YAML used to set the fixed ROGMap boundary"
     )
 
     declare_params_file_cmd = DeclareLaunchArgument(
@@ -336,6 +345,7 @@ def generate_launch_description():
 
     # Declare the launch options
     ld.add_action(declare_namespace_cmd)
+    ld.add_action(declare_map_yaml_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_params_file_cmd)
     ld.add_action(declare_autostart_cmd)

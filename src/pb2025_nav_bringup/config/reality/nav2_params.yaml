@@ -426,16 +426,18 @@ planner_server:
         inflation_resolution: 0.05
         map_size: [10.0, 10.0, 1.5]
         point_filt_num: 4
-        map_sliding:
+        # HERO/DOGMap-style fixed global window with local updates around odom.
+        fixed_boundary:
           enable: true
-          threshold: 0.2
-          center_offset_enable: true
-          center_offset: [0.0, 0.20, 0.0]
+          origin: [0.0, 0.0, 0.0]
+          map_yaml: ""
+          frame: map
+          require_tf: false
         raycasting:
           enable: true
           batch_update_size: 1
           ray_range: [0.03, 10.0]
-          local_update_box: [10.0, 10.0, 2.5]
+          local_update_box: [8.0, 8.0, 2.5]
         decay:
           enable: true
           keep_time: 0.5
@@ -453,7 +455,7 @@ planner_server:
         esdf:
           enable: true
           resolution: 0.05
-          local_update_box: [10.0, 10.0, 1.5]
+          local_update_box: [8.0, 8.0, 1.5]
         field:
           enable: true
           max_distance: 6.0
@@ -465,7 +467,7 @@ planner_server:
         visualization:
           enable: true
           rate: 10.0
-          range: [10.0, 10.0, 2.0]
+          range: [8.0, 8.0, 1.5]
           frame_id: odom
 
 smoother_server:

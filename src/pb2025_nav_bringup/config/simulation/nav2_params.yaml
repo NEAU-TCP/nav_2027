@@ -422,16 +422,19 @@ planner_server:
 
         map_size: [14.0, 14.0, 1.5]          #地图尺寸,m
         point_filt_num: 4
-        map_sliding:
+        # HERO/DOGMap-style fixed global window. The robot moves inside this
+        # window; only the local raycasting and ESDF boxes below are updated.
+        fixed_boundary:
           enable: true
-          threshold: 0.2
-          center_offset_enable: true
-          center_offset: [0.0, 0.20, 0.0]
+          origin: [0.0, 0.0, 0.0]
+          map_yaml: ""
+          frame: map
+          require_tf: false
         raycasting:
           enable: true
           batch_update_size: 1
           ray_range: [0.03, 10.0]       #射线有效距离,m
-          local_update_box: [14.0, 14.0, 2.5]
+          local_update_box: [8.0, 8.0, 2.5]
 
           p_hit: 0.90
           p_miss: 0.45
@@ -455,7 +458,7 @@ planner_server:
         esdf:
           enable: true
           resolution: 0.05
-          local_update_box: [14.0, 14.0, 1.5]
+          local_update_box: [8.0, 8.0, 1.5]
         field:
           enable: true
           max_distance: 6.0
@@ -467,7 +470,7 @@ planner_server:
         visualization:
           enable: true
           rate: 10.0
-          range: [14.0, 14.0, 1.5]
+          range: [8.0, 8.0, 1.5]
           frame_id: odom
       minco_optimizer:
         opt_freq: 20.0

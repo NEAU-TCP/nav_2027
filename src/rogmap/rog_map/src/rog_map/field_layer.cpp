@@ -122,6 +122,130 @@ void DynamicLayer::rebuild(int width,
   }
 }
 
+void DynamicLayer::updateDirty(int width,
+  int height,
+  double resolution,
+  const Eigen::Vector2d & origin,
+  const std::vector<uint8_t> & mask,
+  const std::vector<int> & dirty_columns,
+  double inflation_radius,
+  double max_distance,
+  double min_distance,
+  bool clamp_distance,
+  InterpolationMode interpolation,
+  FieldBuildStats * stats)
+{
+  const auto total_start = std::chrono::steady_clock::now();
+  const size_t expected = static_cast<size_t>(std::max(0, width)) *
+    static_cast<size_t>(std::max(0, height));
+  if (width <= 0 || height <= 0 || resolution <= 0.0 || mask.size() != expected ||
+    dirty_columns.empty() || !matchesGeometry(width, height, resolution, origin))
+  {
+    rebuild(width, height, resolution, origin, mask, inflation_radius, max_distance,
+      min_distance, clamp_distance, interpolation, stats);
+    return;
+  }
+
+  const double max_dist = std::max(0.1, max_distance);
+  const double min_dist = std::min(0.0, min_distance);
+  // A changed obstacle can affect every cell within max_distance. Include one
+  // extra cell for interpolation and the discrete EDT boundary.
+  const int halo = static_cast<int>(std::ceil(max_dist / resolution)) + 2;
+  int min_x = width;
+  int min_y = height;
+  int max_x = -1;
+  int max_y = -1;
+  for (const int column : dirty_columns) {
+    if (column < 0 || column >= static_cast<int>(expected)) {
+      continue;
+    }
+    const int x = column % width;
+    const int y = column / width;
+    min_x = std::min(min_x, x);
+    max_x = std::max(max_x, x);
+    min_y = std::min(min_y, y);
+    max_y = std::max(max_y, y);
+  }
+  if (max_x < min_x || max_y < min_y) {
+    return;
+  }
+  min_x = std::max(0, min_x - halo);
+  min_y = std::max(0, min_y - halo);
+  max_x = std::min(width - 1, max_x + halo);
+  max_y = std::min(height - 1, max_y + halo);
+  const int roi_width = max_x - min_x + 1;
+  const int roi_height = max_y - min_y + 1;
+  const size_t roi_size = static_cast<size_t>(roi_width) *
+    static_cast<size_t>(roi_height);
+
+  std::vector<uint8_t> roi_mask(roi_size, 1U);
+  for (int y = 0; y < roi_height; ++y) {
+    for (int x = 0; x < roi_width; ++x) {
+      roi_mask[static_cast<size_t>(y) * roi_width + x] =
+        mask[static_cast<size_t>(y + min_y) * width + x + min_x];
+    }
+  }
+
+  FieldBuildStats local_stats;
+  const auto edt_pos_start = std::chrono::steady_clock::now();
+  std::vector<double> dist_sq_pos;
+  ESDFUtils::computeEDT2D(roi_width, roi_height, roi_mask, dist_sq_pos);
+  local_stats.edt_positive_time_ms = elapsedMs(edt_pos_start);
+  const auto inv_start = std::chrono::steady_clock::now();
+  std::vector<uint8_t> inverse_mask(roi_size, 0U);
+  for (size_t i = 0; i < roi_size; ++i) {
+    inverse_mask[i] = roi_mask[i] == 0U ? 1U : 0U;
+  }
+  local_stats.inverse_mask_time_ms = elapsedMs(inv_start);
+  const auto edt_neg_start = std::chrono::steady_clock::now();
+  std::vector<double> dist_sq_neg;
+  ESDFUtils::computeEDT2D(roi_width, roi_height, inverse_mask, dist_sq_neg);
+  local_stats.edt_negative_time_ms = elapsedMs(edt_neg_start);
+
+  std::vector<double> roi_dist(roi_size, max_dist);
+  const auto fill_start = std::chrono::steady_clock::now();
+  for (size_t i = 0; i < roi_size; ++i) {
+    double raw;
+    if (roi_mask[i] == 1U) {
+      raw = dist_sq_pos[i] >= 1.0e19 ? kFarDistance : std::sqrt(dist_sq_pos[i]) * resolution;
+    } else {
+      raw = dist_sq_neg[i] >= 1.0e19 ? -kFarDistance : -std::sqrt(dist_sq_neg[i]) * resolution;
+    }
+    double value = raw - inflation_radius;
+    if (!std::isfinite(value)) {
+      value = roi_mask[i] == 1U ? kFarDistance : -kFarDistance;
+    }
+    roi_dist[i] = clamp_distance ? std::clamp(value, min_dist, max_dist) : value;
+  }
+  local_stats.distance_fill_time_ms = elapsedMs(fill_start);
+
+  const auto commit_start = std::chrono::steady_clock::now();
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (width_ != width || height_ != height || dist_m_.size() != expected) {
+      lock.unlock();
+      rebuild(width, height, resolution, origin, mask, inflation_radius, max_distance,
+        min_distance, clamp_distance, interpolation, stats);
+      return;
+    }
+    for (int y = 0; y < roi_height; ++y) {
+      for (int x = 0; x < roi_width; ++x) {
+        dist_m_[static_cast<size_t>(y + min_y) * width + x + min_x] =
+          roi_dist[static_cast<size_t>(y) * roi_width + x];
+      }
+    }
+    max_distance_ = max_dist;
+    min_distance_ = min_dist;
+    clamp_distance_ = clamp_distance;
+    interpolation_ = interpolation;
+  }
+  local_stats.commit_time_ms = elapsedMs(commit_start);
+  local_stats.total_time_ms = elapsedMs(total_start);
+  if (stats) {
+    *stats = local_stats;
+  }
+}
+
 bool DynamicLayer::isValid() const
 {
   std::lock_guard<std::mutex> lock(mutex_);

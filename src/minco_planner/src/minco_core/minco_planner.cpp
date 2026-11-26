@@ -13,6 +13,8 @@
 #include <optional>
 #include <stdexcept>
 
+#include <tf2/exceptions.h>
+
 namespace minco_planner {
 
 using namespace color_text;
@@ -129,8 +131,76 @@ bool MincoPlanner::configureRogMap(
   rog_map::Config rog_cfg;
   try {
     rog_cfg.loadFromRosNode(node, plugin_prefix + "rog_map");
+    if (rog_cfg.fixed_boundary_en && !rog_cfg.fixed_boundary_map_yaml.empty() &&
+        rog_cfg.fixed_boundary_frame != rog_cfg.frame_id) {
+      bool boundary_tf_available = false;
+      geometry_msgs::msg::TransformStamped transform;
+      if (tf_) {
+        try {
+          transform = tf_->lookupTransform(
+            rog_cfg.frame_id, rog_cfg.fixed_boundary_frame, tf2::TimePointZero);
+          boundary_tf_available = true;
+        } catch (const tf2::TransformException & e) {
+          if (rog_cfg.fixed_boundary_require_tf) {
+            throw;
+          }
+          RCLCPP_WARN(logger_,
+            "[MincoPlanner] Fixed boundary TF '%s' -> '%s' is not available yet (%s). "
+            "Using the initial map/odom alignment; boundary TF will not be retroactively applied.",
+            rog_cfg.fixed_boundary_frame.c_str(), rog_cfg.frame_id.c_str(), e.what());
+        }
+      } else if (rog_cfg.fixed_boundary_require_tf) {
+        throw std::runtime_error("TF buffer is unavailable for fixed-boundary frame conversion");
+      }
+      if (!boundary_tf_available) {
+        RCLCPP_INFO(logger_,
+          "[MincoPlanner] Fixed ROGMap boundary uses initial '%s'/'%s' alignment",
+          rog_cfg.fixed_boundary_frame.c_str(), rog_cfg.frame_id.c_str());
+      } else {
+      const auto & t = transform.transform.translation;
+      const auto & q = transform.transform.rotation;
+      const double yaw = std::atan2(
+        2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+      const double c = std::cos(yaw);
+      const double s = std::sin(yaw);
+      const double half_x = rog_cfg.map_size_d.x() * 0.5;
+      const double half_y = rog_cfg.map_size_d.y() * 0.5;
+      double min_x = std::numeric_limits<double>::infinity();
+      double min_y = std::numeric_limits<double>::infinity();
+      double max_x = -std::numeric_limits<double>::infinity();
+      double max_y = -std::numeric_limits<double>::infinity();
+      for (const auto & corner : std::vector<std::pair<double, double>>{
+             {-half_x, -half_y}, {-half_x, half_y}, {half_x, -half_y}, {half_x, half_y}}) {
+        const double x = rog_cfg.fix_map_origin.x() + corner.first;
+        const double y = rog_cfg.fix_map_origin.y() + corner.second;
+        const double tx = t.x + c * x - s * y;
+        const double ty = t.y + s * x + c * y;
+        min_x = std::min(min_x, tx);
+        min_y = std::min(min_y, ty);
+        max_x = std::max(max_x, tx);
+        max_y = std::max(max_y, ty);
+      }
+      rog_cfg.fix_map_origin.x() = (min_x + max_x) * 0.5;
+      rog_cfg.fix_map_origin.y() = (min_y + max_y) * 0.5;
+      rog_cfg.fix_map_origin.z() += t.z;
+      rog_cfg.map_size_d.x() = max_x - min_x;
+      rog_cfg.map_size_d.y() = max_y - min_y;
+      RCLCPP_INFO(logger_,
+        "[MincoPlanner] transformed fixed ROGMap boundary from '%s' to '%s': "
+        "center=(%.3f, %.3f), size=(%.3f, %.3f)",
+        rog_cfg.fixed_boundary_frame.c_str(), rog_cfg.frame_id.c_str(),
+        rog_cfg.fix_map_origin.x(), rog_cfg.fix_map_origin.y(),
+        rog_cfg.map_size_d.x(), rog_cfg.map_size_d.y());
+      }
+    }
     rog_map_ros_ = std::make_shared<rog_map::ROGMapROS>(node, rog_cfg, tf_);
     rog_query_raw_ = rog_map_ros_->queryInterface();
+  } catch (const tf2::TransformException & e) {
+    RCLCPP_ERROR(logger_, "[MincoPlanner] Cannot align fixed ROGMap boundary with TF: %s", e.what());
+    rog_map_ros_.reset();
+    rog_query_raw_.reset();
+    map_.reset();
+    throw;
   } catch (const std::exception & e) {
     RCLCPP_ERROR(logger_, "[MincoPlanner] Failed to configure ROGMap: %s", e.what());
     rog_map_ros_.reset();

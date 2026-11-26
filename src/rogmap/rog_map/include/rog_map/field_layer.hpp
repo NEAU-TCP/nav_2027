@@ -53,6 +53,23 @@ public:
     InterpolationMode interpolation = InterpolationMode::BILINEAR,
     FieldBuildStats * stats = nullptr);
 
+  // Rebuild only the region influenced by changed projection columns. The
+  // region is expanded by max_distance so values near its edge still see all
+  // possible obstacle sources. Geometry and the existing distance field must
+  // already be initialized.
+  void updateDirty(int width,
+    int height,
+    double resolution,
+    const Eigen::Vector2d & origin,
+    const std::vector<uint8_t> & mask,
+    const std::vector<int> & dirty_columns,
+    double inflation_radius,
+    double max_distance = 3.0,
+    double min_distance = -1.0,
+    bool clamp_distance = true,
+    InterpolationMode interpolation = InterpolationMode::BILINEAR,
+    FieldBuildStats * stats = nullptr);
+
   void evaluate(const Eigen::Vector3d & pos, double & dist, Eigen::Vector3d & grad) const;
 
   bool isValid() const;

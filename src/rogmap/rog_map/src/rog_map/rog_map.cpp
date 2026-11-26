@@ -748,17 +748,27 @@ void ROGMap::refreshLayers()
     const auto field_start = std::chrono::steady_clock::now();
     FieldBuildStats field_stats;
     field_stale_ = true;
-    field_->update(layer_->width(),
-      layer_->height(),
-      layer_->resolution(),
-      layer_->origin(),
-      fused_projection_mask_,
-      cfg_.field_inflation_radius,
-      cfg_.field_max_distance,
-      cfg_.field_min_distance,
-      cfg_.field_clamp_distance_en,
-      parseInterpolationMode(cfg_.field_interpolation),
-      &field_stats);
+    const bool local_field_update =
+      !field_geometry_changed && !prior_changed && !force_full_refresh && has_dirty_update;
+    if (local_field_update) {
+      field_->updateDirty(
+        layer_->width(), layer_->height(), layer_->resolution(), layer_->origin(),
+        fused_projection_mask_, projection_dirty_columns, cfg_.field_inflation_radius,
+        cfg_.field_max_distance, cfg_.field_min_distance, cfg_.field_clamp_distance_en,
+        parseInterpolationMode(cfg_.field_interpolation), &field_stats);
+    } else {
+      field_->update(layer_->width(),
+        layer_->height(),
+        layer_->resolution(),
+        layer_->origin(),
+        fused_projection_mask_,
+        cfg_.field_inflation_radius,
+        cfg_.field_max_distance,
+        cfg_.field_min_distance,
+        cfg_.field_clamp_distance_en,
+        parseInterpolationMode(cfg_.field_interpolation),
+        &field_stats);
+    }
     const double previous_field_update_time = last_field_update_time_;
     last_field_update_time_ = current_update_time_;
     last_field_stamp_ = current_update_time_;
@@ -772,7 +782,7 @@ void ROGMap::refreshLayers()
     runtime_stats_.field_distance_fill_time = field_stats.distance_fill_time_ms;
     runtime_stats_.field_copy_time = field_stats.commit_time_ms;
     runtime_stats_.field_actual_update = 1.0;
-    runtime_stats_.field_skip_reason = "none";
+    runtime_stats_.field_skip_reason = local_field_update ? "local_dirty_update" : "none";
     runtime_stats_.field_update_count = 1.0;
     runtime_stats_.field_update_interval_ms =
       std::isfinite(previous_field_update_time)

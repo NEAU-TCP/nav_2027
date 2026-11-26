@@ -24,7 +24,11 @@
 #pragma once
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <limits>
 #include <stdexcept>
+#include <yaml-cpp/yaml.h>
 
 #include <nav2_util/node_utils.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -147,6 +151,28 @@ public:
       map_center_offset = Vec3f::Zero();
     }
     fix_map_origin = loadVec3("fix_map_origin", vector<double>{0.0, 0.0, 0.0});
+    // DOGMap-style operation keeps one global, fixed map window and only
+    // updates the local ray-casting/ESDF region around the robot.  Keep this
+    // as an explicit option instead of relying on the less descriptive
+    // map_sliding.enable=false setting alone.
+    fixed_boundary_en = false;
+    load("fixed_boundary.enable", fixed_boundary_en);
+    if (fixed_boundary_en) {
+      fix_map_origin = loadVec3("fixed_boundary.origin", {
+          fix_map_origin.x(), fix_map_origin.y(), fix_map_origin.z()});
+      fixed_boundary_map_yaml.clear();
+      fixed_boundary_frame = "map";
+      fixed_boundary_require_tf = false;
+      load("fixed_boundary.map_yaml", fixed_boundary_map_yaml);
+      load("fixed_boundary.frame", fixed_boundary_frame);
+      load("fixed_boundary.require_tf", fixed_boundary_require_tf);
+      if (fixed_boundary_frame.empty()) {
+        fixed_boundary_frame = "map";
+      }
+      map_sliding_en = false;
+      map_center_offset_enable = false;
+      map_sliding_thresh = -1.0;
+    }
     frontier_extraction_en = false;
     load("frontier_extraction_en", frontier_extraction_en);
 
@@ -261,6 +287,16 @@ public:
     load("inflation_step", inflation_step);
     load("intensity_thresh", intensity_thresh);
     map_size_d = loadVec3("map_size", vector<double>{10.0, 10.0, 0.0});
+    if (fixed_boundary_en && !fixed_boundary_map_yaml.empty()) {
+      loadFixedBoundaryFromMapYaml(node);
+    }
+    if (fixed_boundary_en) {
+      RCLCPP_INFO(node->get_logger(),
+        "[ROGMap Config] fixed boundary enabled: center=(%.3f, %.3f, %.3f), "
+        "size=(%.3f, %.3f, %.3f), source_frame='%s'; map sliding and center offset disabled",
+        fix_map_origin.x(), fix_map_origin.y(), fix_map_origin.z(),
+        map_size_d.x(), map_size_d.y(), map_size_d.z(), fixed_boundary_frame.c_str());
+    }
     load("point_filt_num", point_filt_num);
     if (point_filt_num <= 0) {
       point_filt_num = 1;
@@ -686,6 +722,10 @@ public:
   /* aster properties */
   string frame_id{};
   bool map_sliding_en{true};
+  bool fixed_boundary_en{false};
+  string fixed_boundary_map_yaml{};
+  string fixed_boundary_frame{"map"};
+  bool fixed_boundary_require_tf{false};
   bool map_center_offset_enable{false};
   Vec3f map_center_offset{Vec3f::Zero()};
   Vec3f fix_map_origin{};
@@ -709,6 +749,108 @@ public:
 
   double unk_thresh{};
   double map_sliding_thresh{};
+
+  template <typename NodeT> void loadFixedBoundaryFromMapYaml(const NodeT & node)
+  {
+    namespace fs = std::filesystem;
+    auto readImageSize = [](const fs::path & image_path) {
+      std::ifstream image(image_path, std::ios::binary);
+      if (!image) {
+        throw std::runtime_error("cannot open map image: " + image_path.string());
+      }
+      unsigned char header[24]{};
+      image.read(reinterpret_cast<char *>(header), sizeof(header));
+      const auto readBigEndian32 = [](const unsigned char * bytes) {
+        return (static_cast<uint32_t>(bytes[0]) << 24) |
+               (static_cast<uint32_t>(bytes[1]) << 16) |
+               (static_cast<uint32_t>(bytes[2]) << 8) |
+               static_cast<uint32_t>(bytes[3]);
+      };
+      constexpr unsigned char png_signature[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+      if (image.gcount() == static_cast<std::streamsize>(sizeof(header)) &&
+          std::equal(std::begin(png_signature), std::end(png_signature), header) &&
+          std::string(reinterpret_cast<const char *>(header + 12), 4) == "IHDR") {
+        const uint32_t width = readBigEndian32(header + 16);
+        const uint32_t height = readBigEndian32(header + 20);
+        if (width > 0 && height > 0) {
+          return std::pair<uint32_t, uint32_t>{width, height};
+        }
+        throw std::runtime_error("PNG map image has invalid dimensions");
+      }
+
+      image.clear();
+      image.seekg(0);
+      auto readPgmToken = [&image]() {
+        std::string token;
+        while (image) {
+          image >> std::ws;
+          if (image.peek() != '#') {
+            break;
+          }
+          image.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        }
+        image >> token;
+        return token;
+      };
+      const std::string magic = readPgmToken();
+      if (magic != "P2" && magic != "P5") {
+        throw std::runtime_error("map image must be PNG or PGM: " + image_path.string());
+      }
+      const auto width = static_cast<uint32_t>(std::stoul(readPgmToken()));
+      const auto height = static_cast<uint32_t>(std::stoul(readPgmToken()));
+      if (width == 0 || height == 0) {
+        throw std::runtime_error("PGM map image has invalid dimensions");
+      }
+      return std::pair<uint32_t, uint32_t>{width, height};
+    };
+
+    const fs::path yaml_path = fs::absolute(fixed_boundary_map_yaml);
+    try {
+      const YAML::Node map_yaml = YAML::LoadFile(yaml_path.string());
+      if (!map_yaml["image"] || !map_yaml["resolution"] || !map_yaml["origin"]) {
+        throw std::runtime_error("map YAML must define image, resolution, and origin");
+      }
+      const fs::path image_value(map_yaml["image"].as<string>());
+      const fs::path image_path = image_value.is_absolute() ? image_value : yaml_path.parent_path() / image_value;
+      const auto [image_width, image_height] = readImageSize(image_path);
+      const double resolution_value = map_yaml["resolution"].as<double>();
+      const auto origin = map_yaml["origin"].as<vector<double>>();
+      if (resolution_value <= 0.0 || origin.size() < 3) {
+        throw std::runtime_error("map resolution must be positive and origin must have 3 values");
+      }
+
+      const double width = static_cast<double>(image_width) * resolution_value;
+      const double height = static_cast<double>(image_height) * resolution_value;
+      const double c = std::cos(origin[2]);
+      const double s = std::sin(origin[2]);
+      double min_x = std::numeric_limits<double>::infinity();
+      double min_y = std::numeric_limits<double>::infinity();
+      double max_x = -std::numeric_limits<double>::infinity();
+      double max_y = -std::numeric_limits<double>::infinity();
+      const std::vector<std::pair<double, double>> corners = {
+        {0.0, 0.0}, {width, 0.0}, {0.0, height}, {width, height}};
+      for (const auto & corner : corners) {
+        const double x = origin[0] + c * corner.first - s * corner.second;
+        const double y = origin[1] + s * corner.first + c * corner.second;
+        min_x = std::min(min_x, x);
+        min_y = std::min(min_y, y);
+        max_x = std::max(max_x, x);
+        max_y = std::max(max_y, y);
+      }
+      map_size_d.x() = max_x - min_x;
+      map_size_d.y() = max_y - min_y;
+      fix_map_origin.x() = (min_x + max_x) * 0.5;
+      fix_map_origin.y() = (min_y + max_y) * 0.5;
+      RCLCPP_INFO(node->get_logger(),
+        "[ROGMap Config] map boundary from '%s': image=%dx%d resolution=%.4f "
+        "origin=(%.3f, %.3f, %.3f), bounds=[%.3f, %.3f]-[%.3f, %.3f]",
+        yaml_path.c_str(), image_width, image_height, resolution_value,
+        origin[0], origin[1], origin[2], min_x, min_y, max_x, max_y);
+    } catch (const std::exception & error) {
+      throw std::runtime_error(
+        "failed to load fixed boundary from map YAML '" + yaml_path.string() + "': " + error.what());
+    }
+  }
 
   void resetMapSize()
   {
